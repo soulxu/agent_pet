@@ -1,0 +1,16 @@
+build/
+*.bin
+*.elf
+*.map
+__pycache__/
+*.pyc
+.DS_Store
+relay/.venv/
+
+# mTLS 证书/私钥: 每台机器自己 gen_certs.sh 生成, 不入库
+relay/certs/
+firmware/certs.h
+
+# 本地测试残留
+relay/_*
+/tmp/

@@ -1,0 +1,8 @@
+{
+  "url": "http://127.0.0.1:8799",
+  "activity": true,
+  "app_name": "Cursor",
+  "detect_mode": "auto",
+  "wait_threshold_ms": 2500,
+  "activate_on_wait": true
+}

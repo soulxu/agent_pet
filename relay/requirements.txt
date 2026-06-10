@@ -1,0 +1,4 @@
+# AX 审批检测 (首选). 没装则自动回退启发式检测, 不影响基本功能.
+# relay 现在是纯 HTTP, 不需要蓝牙库.
+pyobjc-framework-Cocoa>=10.0
+pyobjc-framework-ApplicationServices>=10.0
