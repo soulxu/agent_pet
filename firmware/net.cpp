@@ -1,3 +1,7 @@
+// Atom Lite 是纯蓝牙键盘, 不联网; 整个 net 模块在 Atom target 下编译为空,
+// 这样也不需要 certs.h (gen_certs.sh 的产物).
+#if !defined(AGENTPET_ATOM)
+
 #include "net.h"
 
 #include <ArduinoJson.h>
@@ -234,3 +238,5 @@ void startPortal() {
 }
 
 }  // namespace net
+
+#endif  // !AGENTPET_ATOM

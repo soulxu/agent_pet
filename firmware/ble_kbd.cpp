@@ -6,8 +6,12 @@
 #include <BLESecurity.h>
 #include <BLEServer.h>
 #include <HIDTypes.h>
+#include <esp_gap_ble_api.h>
+#if defined(CONFIG_BT_CLASSIC_ENABLED)
+#include <esp_gap_bt_api.h>
+#endif
 
-extern "C" int ble_store_clear(void);
+#include <cstdlib>
 
 namespace ble_kbd {
 
@@ -62,7 +66,16 @@ class SecurityCb : public BLESecurityCallbacks {
   uint32_t onPassKeyRequest() override { return 0; }
   void onPassKeyNotify(uint32_t) override {}
   bool onConfirmPIN(uint32_t) override { return true; }
-  bool onSecurityRequest() override { return true; }
+  bool onSecurityRequest() override {
+    Serial.println("[kbd] onSecurityRequest -> accept");
+    return true;
+  }
+#if defined(CONFIG_BLUEDROID_ENABLED)
+  void onAuthenticationComplete(esp_ble_auth_cmpl_t desc) override {
+    Serial.printf("[kbd] auth complete: success=%d fail_reason=0x%x\n",
+                  desc.success, desc.fail_reason);
+  }
+#endif
 };
 
 }  // namespace
@@ -72,13 +85,27 @@ void begin(const char* name) {
   BLEDevice::setPower(ESP_PWR_LVL_P9);
   BLEDevice::setSecurityCallbacks(new SecurityCb());
 
+#if defined(CONFIG_BT_CLASSIC_ENABLED)
+  // 经典 ESP32 (如 Atom Lite 的 ESP32-PICO-D4) 蓝牙是双模. 这套 core 把控制器跑在
+  // BTDM(经典+BLE), macOS 可能从经典 BT 那侧发现设备却给不出 BLE 配对入口
+  // (表现: 看得到但"没有连接按钮"). 关掉经典 BT 的可发现/可连接, 强制只走 BLE.
+  esp_bt_gap_set_scan_mode(ESP_BT_NON_CONNECTABLE, ESP_BT_NON_DISCOVERABLE);
+#endif
+
   g_server = BLEDevice::createServer();
   g_server->setCallbacks(new ServerCb());
 
   g_hid = new BLEHIDDevice(g_server);
   g_input = g_hid->inputReport(1);
   g_hid->manufacturer()->setValue("agent_pet");
-  g_hid->pnp(0x02, 0x05ac, 0x820a, 0x0100);   // 伪装成苹果蓝牙键盘
+  // 伪装成苹果蓝牙键盘 (跳过 macOS 键盘识别向导). 但两台设备若用**完全相同**的
+  // VID:PID, macOS 的 HID 层会按 VID:PID 缓存/去重, 第二台会被顶掉 ("点连接就消失").
+  // 所以每个 target 用不同的 product id, 让 macOS 当成两台独立键盘.
+#if defined(AGENTPET_ATOM)
+  g_hid->pnp(0x02, 0x05ac, 0x820b, 0x0110);   // Atom Lite: 区别于 StickS3
+#else
+  g_hid->pnp(0x02, 0x05ac, 0x820a, 0x0100);   // StickS3
+#endif
   g_hid->hidInfo(0x00, 0x01);
   g_hid->reportMap((uint8_t*)HID_REPORT_MAP, sizeof(HID_REPORT_MAP));
   g_hid->startServices();
@@ -90,9 +117,20 @@ void begin(const char* name) {
   sec->setInitEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
   sec->setRespEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
 
+  // 主广播包只放 flags + appearance + HID 服务 (很小), 名字放进 scan response.
+  // 否则长名字 (如 "AgentPet-AtomLite") 会把主广播包撑过 31 字节上限, 导致
+  // esp_ble_gap_config_adv_data 失败 -> macOS 识别不到键盘 / "没有连接按钮".
+  BLEAdvertisementData advData;
+  advData.setFlags(ESP_BLE_ADV_FLAG_GEN_DISC | ESP_BLE_ADV_FLAG_BREDR_NOT_SPT);
+  advData.setAppearance(0x03C1);  // HID Keyboard
+  advData.setCompleteServices(g_hid->hidService()->getUUID());
+
+  BLEAdvertisementData scanResp;
+  scanResp.setName(name);
+
   BLEAdvertising* adv = BLEDevice::getAdvertising();
-  adv->setAppearance(0x03C1);  // HID Keyboard
-  adv->addServiceUUID(g_hid->hidService()->getUUID());
+  adv->setAdvertisementData(advData);
+  adv->setScanResponseData(scanResp);
   adv->setScanResponse(true);
   adv->setMinPreferred(0x06);
   adv->setMinPreferred(0x12);
@@ -120,8 +158,19 @@ void tap(uint8_t mods, uint8_t key) {
 }
 
 void clearBonds() {
-  int rc = ble_store_clear();
-  Serial.printf("[kbd] ble_store_clear rc=%d\n", rc);
+  // Bluedroid: 枚举已绑定设备逐个删除 (必须在 BLEDevice::init 之后调用).
+  int n = esp_ble_get_bond_device_num();
+  if (n <= 0) { Serial.println("[kbd] 无配对记录可清除"); return; }
+  esp_ble_bond_dev_t* list =
+      (esp_ble_bond_dev_t*)malloc(sizeof(esp_ble_bond_dev_t) * n);
+  if (!list) { Serial.println("[kbd] clearBonds malloc 失败"); return; }
+  if (esp_ble_get_bond_device_list(&n, list) == ESP_OK) {
+    for (int i = 0; i < n; ++i) esp_ble_remove_bond_device(list[i].bd_addr);
+    Serial.printf("[kbd] 已清除 %d 条蓝牙配对记录\n", n);
+  } else {
+    Serial.println("[kbd] 读取配对列表失败");
+  }
+  free(list);
 }
 
 }  // namespace ble_kbd

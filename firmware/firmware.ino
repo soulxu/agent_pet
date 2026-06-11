@@ -1,35 +1,63 @@
 // ============================================================================
-// agent_pet - M5StickS3 上的 "AI agent 宠物".
+// agent_pet - "AI agent 宠物" 固件. 一份代码支持两种 M5Stack 设备:
 //
-// 架构 (拆成两条独立通道, 各管各的, 最稳):
-//   1) 蓝牙: StickS3 = 一个**纯 HID 键盘**. macOS 当普通蓝牙键盘连接.
-//        BtnA 单击    = 回车 (Enter)  -> 批准
-//        BtnA 长按1秒 = Shift+回车     -> 批准 (场景二)
-//        BtnB 单击    = Esc           -> 取消/拒绝
-//   2) WiFi: agent 状态走 WiFi. StickS3 轮询 Mac 上 relay 的 /state, 拿到聚合
-//        状态驱动眼睛颜色: 黄=忙, 红=等待批准, 绿=空闲/完成.
+//   * M5StickS3 (有屏): 两颗大眼睛 + 颜色表达 agent 状态, 并走 WiFi mTLS 拉 relay
+//        状态. 蓝牙名 "AgentPet".
+//       BtnA 单击 = 回车   BtnA 长按1秒 = Shift+回车
+//       BtnB 单击 = Esc    BtnB 长按    = 进入 WiFi 配网
 //
-// 按键:
-//   BtnA 单击 = 回车   BtnA 长按1秒 = Shift+回车
-//   BtnB 单击 = Esc    BtnB 长按    = 进入 WiFi 配网 (SoftAP)
+//   * M5Atom Lite (单键 + 一颗 RGB LED, 无屏): **纯蓝牙键盘**, 不联网、不报状态.
+//        蓝牙名 "AgentPet-AtomLite". LED 只做配对/连接指示:
+//          蓝色呼吸 = 待配对    绿色呼吸 = 已连接
+//       单击 = 回车   长按1秒 = Shift+回车   双击 = Esc
+//
+// 两者共用纯 BLE HID 键盘 (敲回车/Shift+回车/Esc). Atom 没有 PSRAM, BLE 与 WiFi
+// 共存会把内部 RAM 吃光导致 TLS 握手失败, 所以 Atom 干脆只做键盘.
+//
+// 编译 target 由宏决定: 定义 AGENTPET_ATOM (或板子宏 ARDUINO_M5STACK_ATOM) 走 Atom,
+// 否则走 StickS3. 见 firmware/flash.sh 的 TARGET 参数.
 // ============================================================================
+
+#if defined(AGENTPET_ATOM) || defined(ARDUINO_M5STACK_ATOM)
+  #define IS_ATOM 1
+#else
+  #define IS_ATOM 0
+#endif
 
 #include <M5Unified.h>
 
 #include "app_prefs.h"
 #include "ble_kbd.h"
-#include "eyes.h"
-#include "net.h"
+
+#if IS_ATOM
+  #include "status_led.h"
+#else
+  #include "eyes.h"
+  #include "net.h"
+#endif
 
 SET_LOOP_TASK_STACK_SIZE(16 * 1024);
 
-static constexpr int SCREEN_W = 240;
-static constexpr int SCREEN_H = 135;
+#if IS_ATOM
+static const char* BLE_NAME = "AgentPet-AtomLite";
+#else
 static const char* BLE_NAME = "AgentPet";
+#endif
 
 // HID usage codes
 static constexpr uint8_t KEY_ENTER = 0x28;
 static constexpr uint8_t KEY_ESC   = 0x29;
+static constexpr uint8_t MOD_SHIFT = 0x02;  // 左 Shift
+
+// 按键动作 (两 target 共用同一套 HID 输出)
+static void doEnter()      { ble_kbd::tap(0x00, KEY_ENTER); }
+static void doShiftEnter() { ble_kbd::tap(MOD_SHIFT, KEY_ENTER); }
+static void doEsc()        { ble_kbd::tap(0x00, KEY_ESC); }
+
+#if !IS_ATOM
+// ============================ StickS3 (有屏 + 联网) =========================
+static constexpr int SCREEN_W = 240;
+static constexpr int SCREEN_H = 135;
 
 static M5Canvas canvas(&M5.Display);
 
@@ -58,6 +86,11 @@ static String g_lastState;
 
 static void applyBrightness() { M5.Display.setBrightness(BRIGHT_LEVELS[g_brightIdx]); }
 static void setToast(const String& t) { g_toast = t; g_toastUntil = millis() + 1200; }
+
+static String effectiveState() {
+  if (net::relayOk()) return net::state();
+  return "";  // relay 不通 -> 未知
+}
 
 static uint16_t stateColor(const String& st) {
   if (st == "wait") return COL_RED;
@@ -95,7 +128,6 @@ static void playChime(bool wait) {
   else      { M5.Speaker.tone(988, 110); delay(120); M5.Speaker.tone(1319, 170); delay(180); }
 }
 
-// 状态变成 wait 时响一声; 由 wait 变回空闲时柔和一声.
 static void checkChime(const String& st) {
   if (st == g_lastState) return;
   if (st == "wait") playChime(true);
@@ -103,22 +135,17 @@ static void checkChime(const String& st) {
   g_lastState = st;
 }
 
-static String effectiveState() {
-  if (net::relayOk()) return net::state();
-  return "";  // relay 不通 -> 未知
-}
-
 static void renderPortal() {
   canvas.fillScreen(COL_BG);
   canvas.setFont(&fonts::efontCN_16);
   canvas.setTextDatum(MC_DATUM);
   canvas.setTextColor(COL_BLUE);
-  canvas.drawString("WiFi \u914d\u7f51", SCREEN_W / 2, 24);  // WiFi 配网
+  canvas.drawString("WiFi \u914d\u7f51", SCREEN_W / 2, 24);
   canvas.setFont(&fonts::efontCN_14);
   canvas.setTextColor(COL_FG);
-  canvas.drawString("\u8fde\u70ed\u70b9: " + net::apSsid(), SCREEN_W / 2, 58);  // 连热点
+  canvas.drawString("\u8fde\u70ed\u70b9: " + net::apSsid(), SCREEN_W / 2, 58);
   canvas.setTextColor(COL_AMBER);
-  canvas.drawString("\u6d4f\u89c8\u5668\u6253\u5f00", SCREEN_W / 2, 84);          // 浏览器打开
+  canvas.drawString("\u6d4f\u89c8\u5668\u6253\u5f00", SCREEN_W / 2, 84);
   canvas.drawString("http://192.168.4.1", SCREEN_W / 2, 106);
   canvas.pushSprite(0, 0);
 }
@@ -129,16 +156,13 @@ static void renderFrame() {
   canvas.fillScreen(COL_BG);
   eyes::render(canvas, COL_BG);
 
-  // 顶栏: HID(绿) / WiFi(蓝) / relay(白点表示拿到状态) 三个小点
   canvas.fillCircle(9, 9, 4, ble_kbd::connected() ? COL_GREEN : COL_OFF);
   canvas.fillCircle(22, 9, 4, net::wifiConnected() ? COL_BLUE : COL_OFF);
   canvas.fillCircle(35, 9, 4, net::relayOk() ? COL_FG : COL_OFF);
 
-  // 底部 HUD
   canvas.setFont(&fonts::efontCN_14);
   String st = effectiveState();
 
-  // 右下角: 连上 WiFi 后显示本机 IP
   int leftMax = SCREEN_W - 12;
   if (net::wifiConnected()) {
     String ip = net::localIP();
@@ -151,10 +175,10 @@ static void renderFrame() {
   canvas.setTextDatum(BL_DATUM);
   if (!net::wifiConnected()) {
     canvas.setTextColor(COL_DIM);
-    canvas.drawString("WiFi \u672a\u8fde (\u957f\u6309B\u914d\u7f51)", 6, SCREEN_H - 3);  // WiFi 未连
+    canvas.drawString("WiFi \u672a\u8fde (\u957f\u6309B\u914d\u7f51)", 6, SCREEN_H - 3);
   } else if (!net::relayOk()) {
     canvas.setTextColor(COL_DIM);
-    canvas.drawString(clipToWidth("\u7b49 relay (" + net::relayHost() + ")", leftMax), 6, SCREEN_H - 3);  // 等 relay
+    canvas.drawString(clipToWidth("\u7b49 relay (" + net::relayHost() + ")", leftMax), 6, SCREEN_H - 3);
   } else {
     String line = net::label().length() ? net::label() : String("agent");
     if (net::text().length()) line += "  " + net::text();
@@ -171,11 +195,10 @@ static void renderFrame() {
   canvas.pushSprite(0, 0);
 }
 
-static constexpr uint8_t MOD_SHIFT = 0x02;  // 左 Shift
-static void onAShort() { ble_kbd::tap(0x00, KEY_ENTER); setToast("\u56de\u8f66"); }             // 回车
-static void onAHold()  { ble_kbd::tap(MOD_SHIFT, KEY_ENTER); setToast("Shift+\u56de\u8f66"); }  // Shift+回车
-static void onBShort() { ble_kbd::tap(0x00, KEY_ESC); setToast("ESC"); }                        // Esc
-static void onBHold()  { net::startPortal(); setToast("\u914d\u7f51\u4e2d"); }                  // 配网中
+static void onAShort() { doEnter();      setToast("\u56de\u8f66"); }
+static void onAHold()  { doShiftEnter(); setToast("Shift+\u56de\u8f66"); }
+static void onBShort() { doEsc();        setToast("ESC"); }
+static void onBHold()  { net::startPortal(); setToast("\u914d\u7f51\u4e2d"); }
 
 static void handleButtons(uint32_t now) {
   if (M5.BtnA.isPressed()) {
@@ -194,18 +217,25 @@ static void handleButtons(uint32_t now) {
   }
 }
 
+#else
+// ============================ Atom Lite (单键 + RGB LED, 纯键盘) =============
+static constexpr uint8_t LED_PIN = 27;  // Atom Lite 板载 SK6812 在 GPIO27
+#endif
+
 void setup() {
   auto cfg = M5.config();
   M5.begin(cfg);
-  M5.Display.setRotation(1);
-  M5.Speaker.begin();
-  M5.Power.setExtOutput(false);
 
   Serial.begin(115200);
   delay(150);
   Serial.println("\n=== agent_pet boot ===");
 
   app_prefs::begin();
+
+#if !IS_ATOM
+  M5.Display.setRotation(1);
+  M5.Speaker.begin();
+  M5.Power.setExtOutput(false);
   g_brightIdx = 1;
   for (int i = 0; i < (int)sizeof(BRIGHT_LEVELS); ++i)
     if (BRIGHT_LEVELS[i] == app_prefs::brightness()) g_brightIdx = i;
@@ -215,7 +245,6 @@ void setup() {
   canvas.setColorDepth(16);
   if (!canvas.createSprite(SCREEN_W, SCREEN_H))
     Serial.println("[boot] canvas createSprite FAILED");
-
   eyes::begin();
 
   canvas.fillScreen(COL_BG);
@@ -229,20 +258,46 @@ void setup() {
 
   ble_kbd::begin(BLE_NAME);
   net::begin();
+#else
+  status_led::begin(LED_PIN);
+  M5.BtnA.setHoldThresh(1000);  // 长按 >= 1s 判为 hold
+  ble_kbd::begin(BLE_NAME);     // 纯键盘, 不联网
+  #if defined(AGENTPET_CLEAR_BONDS)
+  // 专用"清配对"固件: 开机清掉设备侧旧 bond, 解决 macOS 那边忘了/这边没忘导致的
+  // 重连密钥不匹配 ("点连接就消失"). 清完正常配一次后, 再烧回普通固件即可.
+  ble_kbd::clearBonds();
+  Serial.println("[boot] 已执行开机清除蓝牙配对记录");
+  #endif
+#endif
 }
 
 void loop() {
   M5.update();
   uint32_t now = millis();
 
-  handleButtons(now);
-  net::loop(now);
+#if IS_ATOM
+  if (M5.BtnA.wasHold())               doShiftEnter();  // 长按1秒
+  else if (M5.BtnA.wasDoubleClicked()) doEsc();          // 双击
+  else if (M5.BtnA.wasSingleClicked()) doEnter();        // 单击
 
+  // LED 只做配对/连接指示: 绿=已连, 蓝=待配对
+  status_led::setStatus(ble_kbd::connected() ? "idle" : "portal");
+  status_led::update(now);
+
+  static uint32_t lastReport = 0;
+  if (now - lastReport >= 10000) {
+    lastReport = now;
+    Serial.printf("[%lu] hid=%d heap=%u\n",
+                  (unsigned long)now, ble_kbd::connected(), ESP.getFreeHeap());
+  }
+#else
+  handleButtons(now);
   String st = effectiveState();
   eyes::setStatus(st.length() ? st : String("idle"));
   eyes::update(now);
   checkChime(st);
   renderFrame();
+  net::loop(now);
 
   static uint32_t lastReport = 0;
   if (now - lastReport >= 10000) {
@@ -251,6 +306,7 @@ void loop() {
                   (unsigned long)now, ble_kbd::connected(), net::wifiConnected(),
                   net::relayOk(), st.c_str(), ESP.getFreeHeap());
   }
+#endif
 
   delay(33);
 }

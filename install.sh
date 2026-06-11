@@ -106,16 +106,20 @@ cat <<EOF
 安装完成. 下一步:
   1) 生成 mTLS 证书 (必须在烧固件前):  $HERE/relay/gen_certs.sh
      会生成 relay/certs/ 和 firmware/certs.h (都不入库).
-  2) 烧固件:  $HERE/firmware/flash.sh
-     (StickS3 = 纯蓝牙键盘: BtnA=回车, BtnA长按=Shift+回车, BtnB=Esc, BtnB长按=配网)
-  3) macOS 蓝牙里把 'AgentPet' 当键盘连接/配对 (系统设置 -> 蓝牙).
-  4) 启动 relay (没用 --launchd 的话):  $PYTHON $RELAY
+  2) 烧固件:
+       StickS3:    $HERE/firmware/flash.sh            (有屏+联网, 蓝牙名 AgentPet)
+       Atom Lite:  TARGET=atom $HERE/firmware/flash.sh (纯键盘, 蓝牙名 AgentPet-AtomLite)
+     按键: StickS3 BtnA=回车/长按Shift+回车, BtnB=Esc/长按配网;
+           Atom 单键 单击=回车/长按Shift+回车/双击=Esc.
+     (Atom Lite 不联网, 不需要 gen_certs.sh / 配网, 烧完直接连蓝牙用.)
+  3) macOS 蓝牙里把设备当键盘连接 (AgentPet / AgentPet-AtomLite).
+  4) [仅 StickS3] 启动 relay (没用 --launchd 的话):  $PYTHON $RELAY
      - HTTP 回环 8799 收 hook; HTTPS+mTLS 8443 给 StickS3 拉状态.
      - 想用 AX 精准检测审批: 系统设置 -> 隐私与安全性 -> 辅助功能,
        勾选运行 relay 的程序 (Terminal / iTerm / python). 没勾就自动回退启发式.
-  5) StickS3 配网 (首次自动开热点 AgentPet-XXXX, http://192.168.4.1):
+  5) [仅 StickS3] 配网 (首次自动开热点 AgentPet-XXXX, http://192.168.4.1):
      填 WiFi + Relay 地址 = relay 打印的 "Mac IP:8443".
   6) 重启 Cursor 让 hooks 生效 (设置 -> Hooks 里能看到).
 
-状态页: http://127.0.0.1:8799/   |   StickS3 状态: https://<MacIP>:8443/state (需客户端证书)
+状态页: http://127.0.0.1:8799/   |   设备状态: https://<MacIP>:8443/state (需客户端证书)
 EOF

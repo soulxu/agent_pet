@@ -13,4 +13,5 @@ firmware/certs.h
 
 # 本地测试残留
 relay/_*
+/_*
 /tmp/
