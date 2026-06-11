@@ -15,11 +15,24 @@
 #   Atom Lite: 一般免手动, 插上即可; 若失败, 按住主键再插 USB.
 set -euo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$HERE/../.." && pwd)"   # 仓库根 (有 acli + .arduino15)
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # firmware/
+REPO="$(cd "$HERE/.." && pwd)"                         # 仓库根
 SKETCH="$HERE"
-ACLI="$ROOT/acli"
 TARGET="${TARGET:-sticks3}"
+
+# 解析 arduino-cli 包装 (acli): 显式 > 仓库内 .toolchain > 旧开发布局 > 缺则自动安装.
+resolve_acli() {
+  if [[ -n "${ACLI:-}" && -x "${ACLI}" ]]; then return; fi
+  if [[ -x "$REPO/.toolchain/acli" ]]; then ACLI="$REPO/.toolchain/acli"; return; fi
+  local c
+  for c in "$REPO/../acli" "$REPO/../../acli"; do
+    [[ -x "$c" ]] && { ACLI="$c"; return; }
+  done
+  echo "[flash] 未找到工具链, 自动运行 setup.sh 安装 ..."
+  "$HERE/setup.sh"
+  ACLI="$REPO/.toolchain/acli"
+}
+resolve_acli
 BAUD="${BAUD:-115200}"
 EXTRA_BUILD=()
 HIDE_LOCAL_PARTITIONS=0
@@ -46,7 +59,7 @@ esac
 echo "[flash] TARGET=$TARGET FQBN=$FQBN"
 
 if [[ ! -x "$ACLI" ]]; then
-  echo "[flash] cannot find acli at $ACLI" >&2
+  echo "[flash] 工具链不可用 ($ACLI); 试试先跑 firmware/setup.sh" >&2
   exit 1
 fi
 

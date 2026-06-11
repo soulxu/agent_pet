@@ -76,7 +76,8 @@ agent_pet/
     net.*          WiFi + SoftAP 配网 + mTLS 轮询 relay /state (独立 task)
     certs.h        (gen_certs.sh 生成) 客户端私钥+证书, 不入库
     app_prefs.*    NVS 配置 (亮度/音效)
-    flash.sh       编译 + 烧录 (TARGET=sticks3|atom)
+    setup.sh       一键装工具链 (arduino-cli + ESP32 core + 依赖库 -> .toolchain/)
+    flash.sh       编译 + 烧录 (TARGET=sticks3|atom; 缺工具链时自动调 setup.sh)
   hooks/           Cursor hook (全 allow + 上报活动)
   relay/           Mac 中枢 (HTTP 回环收 hook + HTTPS mTLS 出 /state)
     relay.py  ax_detect.py  gen_certs.sh  requirements.txt
@@ -103,15 +104,30 @@ python3 relay/relay.py  # HTTP 回环:8799 (hook) + HTTPS mTLS:8443 (StickS3)
 relay 启动会打印 **Mac 局域网 IP** 和 HTTPS 端口(配网时要填)。推荐给运行 relay 的
 终端授"辅助功能"权限(系统设置 → 隐私与安全性 → 辅助功能)以启用 AX 精准检测。
 
-### 2. 烧固件
+### 2. 编译环境 + 烧固件
+
+固件用 **arduino-cli + ESP32(m5stack) core** 编译。`setup.sh` 会把工具链装成
+**自包含**的一套(全在仓库内 `.toolchain/`,不污染系统、不动你的 `~/.arduino15`):
+
+```bash
+firmware/setup.sh        # 装 arduino-cli + m5stack:esp32@3.3.7 core + 依赖库
+                         # (M5Unified / M5GFX / ArduinoJson). 幂等, 已装会跳过.
+```
+
+装好后直接编译烧录(**`flash.sh` 检测到没有工具链会自动调 `setup.sh`**,所以也可
+跳过上一步直接烧):
 
 ```bash
 firmware/flash.sh                 # StickS3: 进入下载模式 (长按机身侧 reset ~2 秒)
 TARGET=atom firmware/flash.sh     # Atom Lite: 插上即可; 失败就按住主键再插 USB
+firmware/flash.sh build           # 只编译不烧录
 ```
 
-> Atom Lite 是纯键盘, **不需要先跑 `gen_certs.sh`**(它不联网, 不 include `certs.h`)。
-> 烧完跳到第 4 步连蓝牙即可。StickS3 才需要证书 + 配网。
+> - `setup.sh` 会下载 m5stack 工具链(约 300MB,含编译器),首次较慢;装在
+>   `.toolchain/`(已 gitignore)。已有 `arduino-cli` 可用 `ARDUINO_CLI=/path/to/arduino-cli
+>   firmware/setup.sh` 复用,省去下载 cli。
+> - Atom Lite 是纯键盘, **不需要先跑 `gen_certs.sh`**(它不联网, 不 include `certs.h`)。
+>   烧完跳到第 4 步连蓝牙即可。StickS3 才需要证书 + 配网。
 
 ### 3. StickS3 配网 (WiFi, 仅 StickS3)
 

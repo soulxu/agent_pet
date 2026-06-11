@@ -1,4 +1,6 @@
 build/
+# 自包含工具链 (firmware/setup.sh 安装的 arduino-cli + core + 库)
+.toolchain/
 *.bin
 *.elf
 *.map
