@@ -6,7 +6,8 @@
 #include <BLESecurity.h>
 #include <BLEServer.h>
 #include <HIDTypes.h>
-#include <esp_gap_ble_api.h>
+// 注意: 不直接 #include <esp_gap_ble_api.h>. 它由 <BLEDevice.h> 传递包含;
+// 在 ESP32-S3 这套 core 下直接用 <> 引会找不到 (bt include 路径只在 BLE 库内部生效).
 #if defined(CONFIG_BT_CLASSIC_ENABLED)
 #include <esp_gap_bt_api.h>
 #endif
@@ -158,6 +159,10 @@ void tap(uint8_t mods, uint8_t key) {
 }
 
 void clearBonds() {
+  // bond 管理 API (esp_ble_get_bond_device_*) 在 esp_gap_ble_api.h 里被
+  // #if (SMP_INCLUDED == TRUE) 包着. 经典 ESP32(Atom)的编译配置里该宏为 TRUE,
+  // 而 ESP32-S3(StickS3)这套 TU 里没定义会被裁掉. S3 也从不调用此函数, 故条件编译.
+#if defined(SMP_INCLUDED) && (SMP_INCLUDED == TRUE)
   // Bluedroid: 枚举已绑定设备逐个删除 (必须在 BLEDevice::init 之后调用).
   int n = esp_ble_get_bond_device_num();
   if (n <= 0) { Serial.println("[kbd] 无配对记录可清除"); return; }
@@ -171,6 +176,9 @@ void clearBonds() {
     Serial.println("[kbd] 读取配对列表失败");
   }
   free(list);
+#else
+  Serial.println("[kbd] clearBonds: 当前编译配置无 bond API, 跳过");
+#endif
 }
 
 }  // namespace ble_kbd

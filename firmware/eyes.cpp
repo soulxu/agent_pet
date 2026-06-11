@@ -37,6 +37,17 @@ uint32_t g_blinkUntilMs = 0;
 int      g_pendingBlinks = 0;
 uint32_t g_nextSaccadeMs = 0;
 
+// ---- 瞌睡 / 晕眩 叠加状态 ----
+constexpr uint32_t SLEEP_AFTER_MS = 20000;  // idle 下无活动多久后入睡
+constexpr uint32_t DIZZY_MS       = 2200;   // 一次晕眩持续时长
+constexpr float    SHAKE_TRIGGER  = 7.0f;   // 晃动强度累积阈值 (越大越难触发)
+
+uint32_t g_lastActiveMs = 0;   // 最近一次活动
+bool     g_asleep       = false;
+uint32_t g_dizzyUntil   = 0;   // <now 表示不在晕眩
+float    g_shakeAccum   = 0;   // 晃动强度 (衰减累积)
+float    g_prevMag      = 1.0f;
+
 float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 float frand(float lo, float hi) { return lo + (hi - lo) * (random(10001) / 10000.0f); }
 uint32_t randRange(uint32_t lo, uint32_t hi) { return hi <= lo ? lo : lo + (uint32_t)random((long)(hi - lo + 1)); }
@@ -56,9 +67,34 @@ void setTargetColor(uint8_t r, uint8_t g, uint8_t b) { g_tgtR = r; g_tgtG = g; g
 
 void begin() {
   g_lastMs = millis();
+  g_lastActiveMs = g_lastMs;
   g_nextBlinkMs = g_lastMs + randRange(2000, 5000);
   g_nextSaccadeMs = g_lastMs + randRange(1500, 4000);
 }
+
+void poke() {
+  g_lastActiveMs = millis();
+  if (g_asleep) {
+    g_asleep = false;
+    g_curH = 0.05f;  // 从闭眼状态睁开 (随后 ease 回 1)
+  }
+}
+
+void sense(float ax, float ay, float az, uint32_t now) {
+  // 用加速度模相对前一帧的变化 (jerk) 衰减累积. 只有持续用力晃才会越过阈值,
+  // 缓慢倾斜/自动旋转那种小抖动会被衰减掉.
+  float mag = sqrtf(ax * ax + ay * ay + az * az);
+  float jerk = fabsf(mag - g_prevMag);
+  g_prevMag = mag;
+  g_shakeAccum = g_shakeAccum * 0.80f + jerk;
+  if (g_shakeAccum > SHAKE_TRIGGER && now >= g_dizzyUntil) {
+    g_dizzyUntil = now + DIZZY_MS;
+    g_shakeAccum = 0;
+    poke();  // 晃动也算活动 -> 唤醒
+  }
+}
+
+bool asleep() { return g_asleep; }
 
 void setStatus(const String& state) {
   Mode m = Mode::Idle;
@@ -66,6 +102,7 @@ void setStatus(const String& state) {
   else if (state == "busy") m = Mode::Busy;
   if (m == g_mode) return;
   g_mode = m;
+  if (m != Mode::Idle) poke();  // 进入忙/等 = 有活动, 唤醒并续命
   switch (m) {
     case Mode::Idle: setTargetColor(60, 200, 110); g_tgtBase = 1.0f; break;
     case Mode::Busy: setTargetColor(255, 186, 64); g_tgtBase = 1.0f; break;
@@ -84,6 +121,25 @@ void update(uint32_t now) {
   g_curG = ease(g_curG, g_tgtG, dt, 220);
   g_curB = ease(g_curB, g_tgtB, dt, 220);
   g_curBase = ease(g_curBase, g_tgtBase, dt, 200);
+
+  // 瞌睡判定: 只有 idle 且不在晕眩时才会发呆入睡; 忙/等表示有事做, 保持清醒.
+  bool dizzy = now < g_dizzyUntil;
+  if (g_mode != Mode::Idle || dizzy) {
+    g_lastActiveMs = now;
+    g_asleep = false;
+  } else if (!g_asleep && now - g_lastActiveMs > SLEEP_AFTER_MS) {
+    g_asleep = true;
+  }
+
+  // 睡着时: 视线归中、闭眼, 跳过扫视/眨眼调度.
+  if (g_asleep) {
+    g_tgtLookX = 0; g_tgtLookY = 0;
+    g_curLookX = ease(g_curLookX, 0, dt, 200);
+    g_curLookY = ease(g_curLookY, 0, dt, 200);
+    g_tgtH = 0.06f;
+    g_curH = ease(g_curH, g_tgtH, dt, 260);  // 慢慢闭上
+    return;
+  }
 
   // 视线: busy 左右扫视; wait 盯住中间; idle 随机扫视
   if (g_mode == Mode::Busy) {
@@ -123,15 +179,64 @@ void update(uint32_t now) {
   g_curH = ease(g_curH, g_tgtH, dt, 55);
 }
 
+namespace {
+
+// 晕眩: 两眼各画一条阿基米德螺旋, 左右反向旋转, 整体随时间左右摇晃.
+void renderDizzy(M5Canvas& canvas, uint16_t col, uint32_t now) {
+  int wob = (int)(sinf(now / 70.0f) * 8.0f);          // 整体摇晃
+  float phase = now / 130.0f;                          // 旋转相位
+  const int cxs[2] = {EYE_LEFT_CX, EYE_RIGHT_CX};
+  const int TURNS = 3;
+  const int STEPS = TURNS * 26;
+  for (int i = 0; i < 2; ++i) {
+    int cx = cxs[i] + wob, cy = EYE_CY;
+    int px = cx, py = cy;
+    for (int s = 0; s <= STEPS; ++s) {
+      float t = (float)s / 26.0f;                      // 圈数 0..TURNS
+      float ang = t * 2.0f * (float)PI + phase * (i == 0 ? 1.0f : -1.0f);
+      float r = (t / TURNS) * (EYE_R - 2);
+      int x = cx + (int)(cosf(ang) * r);
+      int y = cy + (int)(sinf(ang) * r);
+      canvas.drawLine(px, py, x, y, col);
+      // 加粗一点, 看得清楚
+      canvas.drawLine(px + 1, py, x + 1, y, col);
+      px = x; py = y;
+    }
+  }
+}
+
+// 瞌睡: 右上方循环升起的 "z z Z", 越往上越大, 营造冒泡感.
+void drawZzz(M5Canvas& canvas, uint16_t col, uint32_t now) {
+  const lgfx::IFont* fnts[3] = {&fonts::Font2, &fonts::Font4, &fonts::Font6};
+  int bx = EYE_RIGHT_CX + 24;
+  int by = EYE_CY - 6;
+  canvas.setTextColor(col);
+  canvas.setTextDatum(textdatum_t::middle_center);
+  for (int i = 0; i < 3; ++i) {
+    float ph = now / 900.0f + i * 0.55f;
+    float f = ph - floorf(ph);                          // 0..1 循环
+    int x = bx + i * 14 + (int)(f * 6);
+    int y = by - i * 16 - (int)(f * 18);
+    canvas.setFont(fnts[i]);
+    canvas.drawString("z", x, y);
+  }
+}
+
+}  // namespace
+
 void render(M5Canvas& canvas, uint16_t bg) {
   uint32_t now = millis();
-  // 呼吸/脉冲: wait 快而强, busy 中等, idle 慢而弱
+  uint16_t col = to565((uint8_t)g_curR, (uint8_t)g_curG, (uint8_t)g_curB);
+
+  // 晕眩盖在一切之上
+  if (now < g_dizzyUntil) { renderDizzy(canvas, col, now); return; }
+
+  // 呼吸/脉冲: wait 快而强, busy 中等, idle/睡眠 慢而弱
   float amp = g_mode == Mode::Wait ? 0.12f : (g_mode == Mode::Busy ? 0.05f : 0.03f);
   float period = g_mode == Mode::Wait ? 520.0f : (g_mode == Mode::Busy ? 1600.0f : 3800.0f);
+  if (g_asleep) { amp = 0.02f; period = 4200.0f; }     // 睡着时极缓的"起伏"
   float breath = 1.0f + amp * sinf((now % (uint32_t)period) / period * 2.0f * (float)PI);
   float scale = g_curBase * breath;
-
-  uint16_t col = to565((uint8_t)g_curR, (uint8_t)g_curG, (uint8_t)g_curB);
 
   int dx = (int)(clampf(g_curLookX, -1, 1) * LOOK_RANGE_X);
   int dy = (int)(clampf(g_curLookY, -1, 1) * LOOK_RANGE_Y);
@@ -147,6 +252,8 @@ void render(M5Canvas& canvas, uint16_t bg) {
     int r = std::min(w, h) / 2;
     canvas.fillRoundRect(cx - w / 2, cy - h / 2, w, h, r, col);
   }
+
+  if (g_asleep) drawZzz(canvas, col, now);
 }
 
 uint16_t color() { return to565((uint8_t)g_curR, (uint8_t)g_curG, (uint8_t)g_curB); }

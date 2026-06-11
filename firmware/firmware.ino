@@ -81,6 +81,33 @@ static uint32_t g_btnAAt = 0; static bool g_btnAHold = false;
 static uint32_t g_btnBAt = 0; static bool g_btnBHold = false;
 static constexpr uint32_t BTN_HOLD_MS = 1000;
 
+// ---- 陀螺仪/加速度计自动旋转 (横屏上下两个方向: rotation 1 <-> 3) ----
+// 两个方向都是 180x135 横屏, 互为 180° 翻转, 区分靠重力在屏幕"竖直"轴上的分量符号.
+// IMU 轴映射各板不同, 用下面两个常量校准: ROT_AXIS 选轴(0=accX,1=accY),
+// ROT_SIGN 调符号. 串口会打印 ax/ay/az 方便实测翻转后修正.
+static constexpr int   ROT_AXIS = 1;      // 用哪个轴判竖直方向 (0=X, 1=Y)
+static constexpr float ROT_SIGN = 1.0f;   // 翻转后方向反了就改成 -1.0f
+static constexpr float ROT_TH   = 0.35f;  // 死区阈值(g), 临界角度内不切换防抖动
+static int g_rotation = 1;                // 当前屏幕旋转 (1 或 3)
+static float g_imuAx = 0, g_imuAy = 0, g_imuAz = 0;
+
+// 用已读到的全局 accel (g_imuA*) 判方向, 带节流避免频繁切换.
+static void updateOrientation(uint32_t now) {
+  static uint32_t last = 0;
+  if (now - last < 150) return;  // ~7Hz 判一次足够, 也降抖
+  last = now;
+
+  float v = (ROT_AXIS == 0 ? g_imuAx : g_imuAy) * ROT_SIGN;
+  int target = g_rotation;
+  if (v >  ROT_TH) target = 1;
+  else if (v < -ROT_TH) target = 3;  // 死区内 (|v|<=TH) 保持当前方向
+
+  if (target != g_rotation) {
+    g_rotation = target;
+    M5.Display.setRotation(g_rotation);
+  }
+}
+
 static String g_toast; static uint32_t g_toastUntil = 0;
 static String g_lastState;
 
@@ -195,10 +222,10 @@ static void renderFrame() {
   canvas.pushSprite(0, 0);
 }
 
-static void onAShort() { doEnter();      setToast("\u56de\u8f66"); }
-static void onAHold()  { doShiftEnter(); setToast("Shift+\u56de\u8f66"); }
-static void onBShort() { doEsc();        setToast("ESC"); }
-static void onBHold()  { net::startPortal(); setToast("\u914d\u7f51\u4e2d"); }
+static void onAShort() { doEnter();      setToast("\u56de\u8f66");      eyes::poke(); }
+static void onAHold()  { doShiftEnter(); setToast("Shift+\u56de\u8f66"); eyes::poke(); }
+static void onBShort() { doEsc();        setToast("ESC");             eyes::poke(); }
+static void onBHold()  { net::startPortal(); setToast("\u914d\u7f51\u4e2d"); eyes::poke(); }
 
 static void handleButtons(uint32_t now) {
   if (M5.BtnA.isPressed()) {
@@ -292,6 +319,17 @@ void loop() {
   }
 #else
   handleButtons(now);
+
+  // 每帧读一次加速度计: 喂方向检测 + 喂眼睛(晃动->晕眩唤醒)
+  if (M5.Imu.isEnabled()) {
+    float ax, ay, az;
+    if (M5.Imu.getAccel(&ax, &ay, &az)) {
+      g_imuAx = ax; g_imuAy = ay; g_imuAz = az;
+      eyes::sense(ax, ay, az, now);
+    }
+    updateOrientation(now);
+  }
+
   String st = effectiveState();
   eyes::setStatus(st.length() ? st : String("idle"));
   eyes::update(now);
@@ -302,9 +340,10 @@ void loop() {
   static uint32_t lastReport = 0;
   if (now - lastReport >= 10000) {
     lastReport = now;
-    Serial.printf("[%lu] hid=%d wifi=%d relay=%d state=%s heap=%u\n",
+    Serial.printf("[%lu] hid=%d wifi=%d relay=%d state=%s rot=%d imu=%.2f,%.2f,%.2f heap=%u\n",
                   (unsigned long)now, ble_kbd::connected(), net::wifiConnected(),
-                  net::relayOk(), st.c_str(), ESP.getFreeHeap());
+                  net::relayOk(), st.c_str(), g_rotation,
+                  g_imuAx, g_imuAy, g_imuAz, ESP.getFreeHeap());
   }
 #endif
 
