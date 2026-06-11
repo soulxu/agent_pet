@@ -40,7 +40,9 @@ uint32_t g_nextSaccadeMs = 0;
 // ---- 瞌睡 / 晕眩 叠加状态 ----
 constexpr uint32_t SLEEP_AFTER_MS = 20000;  // idle 下无活动多久后入睡
 constexpr uint32_t DIZZY_MS       = 2200;   // 一次晕眩持续时长
-constexpr float    SHAKE_TRIGGER  = 7.0f;   // 晃动强度累积阈值 (越大越难触发)
+constexpr float    SHAKE_TRIGGER  = 7.0f;   // 晃动强度累积阈值 (越大越难触发晕眩)
+constexpr float    WAKE_JERK      = 0.12f;  // 睡着时, 单帧加速度变化超过此值即唤醒
+                                            // (略高于静置噪声, 轻轻动设备就能触发)
 
 uint32_t g_lastActiveMs = 0;   // 最近一次活动
 bool     g_asleep       = false;
@@ -87,11 +89,17 @@ void sense(float ax, float ay, float az, uint32_t now) {
   float jerk = fabsf(mag - g_prevMag);
   g_prevMag = mag;
   g_shakeAccum = g_shakeAccum * 0.80f + jerk;
+
+  // 用力晃 -> 晕眩 (顺带唤醒)
   if (g_shakeAccum > SHAKE_TRIGGER && now >= g_dizzyUntil) {
     g_dizzyUntil = now + DIZZY_MS;
     g_shakeAccum = 0;
-    poke();  // 晃动也算活动 -> 唤醒
+    poke();
+    return;
   }
+  // 睡着时, 轻轻移动一下也能唤醒 (不晕眩). 醒着时小幅移动不重置发呆计时,
+  // 这样静置仍能正常入睡.
+  if (g_asleep && jerk > WAKE_JERK) poke();
 }
 
 bool asleep() { return g_asleep; }
@@ -123,11 +131,14 @@ void update(uint32_t now) {
   g_curBase = ease(g_curBase, g_tgtBase, dt, 200);
 
   // 瞌睡判定: 只有 idle 且不在晕眩时才会发呆入睡; 忙/等表示有事做, 保持清醒.
+  // 注意: poke() 用 millis() 写 g_lastActiveMs, 可能比循环顶部取的 now 略大,
+  // 无符号相减会下溢成超大值 -> 刚唤醒又秒睡. 故用 saturating 减法.
   bool dizzy = now < g_dizzyUntil;
+  uint32_t idleFor = (now > g_lastActiveMs) ? (now - g_lastActiveMs) : 0;
   if (g_mode != Mode::Idle || dizzy) {
     g_lastActiveMs = now;
     g_asleep = false;
-  } else if (!g_asleep && now - g_lastActiveMs > SLEEP_AFTER_MS) {
+  } else if (!g_asleep && idleFor > SLEEP_AFTER_MS) {
     g_asleep = true;
   }
 
