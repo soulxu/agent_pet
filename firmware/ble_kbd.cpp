@@ -14,6 +14,12 @@
 
 #include <cstdlib>
 
+#include "app_prefs.h"  // 当前主机槽持久化 (多主机切换)
+
+#if defined(CONFIG_NIMBLE_ENABLED)
+#include <esp_mac.h>    // esp_read_mac: 派生每个主机槽的静态随机地址
+#endif
+
 // 清配对 (重新配对) 的底层 API 因蓝牙协议栈而异:
 //   * ESP32-S3 (StickS3) 这套 core 用 **NimBLE** -> ble_store_clear() 一把清掉所有 bond.
 //   * 经典 ESP32 (Atom Lite) 用 **Bluedroid** -> 枚举 bond 列表逐个 esp_ble_remove_bond_device.
@@ -69,6 +75,35 @@ BLEHIDDevice*      g_hid = nullptr;
 BLECharacteristic* g_input = nullptr;
 volatile bool      g_conn = false;
 
+#if defined(CONFIG_NIMBLE_ENABLED)
+// ---- 多主机 (Easy-Switch): 每个槽一个独立的静态随机蓝牙地址 ----
+constexpr uint8_t HOST_COUNT = 2;   // 受 CONFIG_BT_NIMBLE_MAX_BONDS=3 约束, 这里用 2
+uint8_t g_host = 0;                 // 当前主机槽
+
+// 用设备 MAC 派生第 slot 个槽的静态随机地址 (各槽不同身份, 各 Mac 当独立键盘).
+void computeSlotAddr(uint8_t slot, uint8_t out[6]) {
+  uint8_t mac[6] = {0};
+  esp_read_mac(mac, ESP_MAC_WIFI_STA);
+  for (int i = 0; i < 6; ++i) out[i] = mac[5 - i];  // NimBLE 地址小端: out[0]=LSB
+  out[0] = (uint8_t)(out[0] ^ (0xC0 + slot));        // 每槽 LSB 不同 -> 不同身份
+  out[5] |= 0xC0;                                     // 静态随机地址: 最高两位置 1
+}
+
+// 把本机蓝牙身份切到第 slot 个槽 (必须在广播停掉时调用).
+bool applyHostAddr(uint8_t slot) {
+  if (!BLEDevice::setOwnAddrType(BLE_OWN_ADDR_RANDOM)) {
+    Serial.println("[kbd] setOwnAddrType(RANDOM) 失败");
+    return false;
+  }
+  uint8_t a[6];
+  computeSlotAddr(slot, a);
+  bool ok = BLEDevice::setOwnAddr(a);
+  Serial.printf("[kbd] 主机槽 %d 身份 %02X:%02X:%02X:%02X:%02X:%02X (set=%d)\n",
+                slot, a[5], a[4], a[3], a[2], a[1], a[0], ok);
+  return ok;
+}
+#endif
+
 class ServerCb : public BLEServerCallbacks {
   void onConnect(BLEServer* s) override {
     g_conn = true;
@@ -103,6 +138,13 @@ void begin(const char* name) {
   BLEDevice::init(name);
   BLEDevice::setPower(ESP_PWR_LVL_P9);
   BLEDevice::setSecurityCallbacks(new SecurityCb());
+
+#if defined(CONFIG_NIMBLE_ENABLED)
+  // 多主机: 开机就把蓝牙身份切到上次用的主机槽, 必须在 startAdvertising 之前设好.
+  g_host = app_prefs::hostSlot();
+  if (g_host >= HOST_COUNT) g_host = 0;
+  applyHostAddr(g_host);
+#endif
 
 #if defined(CONFIG_BT_CLASSIC_ENABLED)
   // 经典 ESP32 (如 Atom Lite 的 ESP32-PICO-D4) 蓝牙是双模. 这套 core 把控制器跑在
@@ -213,10 +255,53 @@ void repair() {
   // 2. 清掉本机侧旧配对密钥 (macOS 那侧也要"移除此设备"才算干净重配).
   clearBonds();
 
-  // 3. 重新开始广播, 让设备立刻回到可被发现/配对状态.
+  // 3. 重新开始广播 (仍是当前主机槽的身份), 让设备立刻回到可被发现/配对状态.
   if (g_server) g_server->startAdvertising();
   else          BLEDevice::startAdvertising();
   Serial.println("[kbd] 已重置, 重新广播中, 可在系统蓝牙里重新配对");
+}
+
+uint8_t hostCount() {
+#if defined(CONFIG_NIMBLE_ENABLED)
+  return HOST_COUNT;
+#else
+  return 1;
+#endif
+}
+
+uint8_t currentHost() {
+#if defined(CONFIG_NIMBLE_ENABLED)
+  return g_host;
+#else
+  return 0;
+#endif
+}
+
+uint8_t switchHost() {
+#if defined(CONFIG_NIMBLE_ENABLED)
+  uint8_t next = (uint8_t)((g_host + 1) % HOST_COUNT);
+  Serial.printf("[kbd] 切换主机槽 %d -> %d\n", g_host, next);
+
+  // 1. 断开当前 host (它会回到"已断开", 不丢配对).
+  if (g_server) {
+    auto peers = g_server->getPeerDevices(false);
+    for (auto& kv : peers) g_server->disconnect(kv.first);
+    if (!peers.empty()) delay(120);
+  }
+  g_conn = false;
+
+  // 2. 停广播 -> 换成目标槽的蓝牙身份 -> 重新广播 (setOwnAddr 要求广播已停).
+  BLEDevice::stopAdvertising();
+  delay(40);
+  g_host = next;
+  app_prefs::setHostSlot(g_host);
+  applyHostAddr(g_host);
+  BLEDevice::startAdvertising();
+  Serial.printf("[kbd] 现广播主机槽 %d, 等该槽配过的 Mac 自动重连\n", g_host);
+  return g_host;
+#else
+  return 0;
+#endif
 }
 
 }  // namespace ble_kbd

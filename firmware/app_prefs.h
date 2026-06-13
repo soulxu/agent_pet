@@ -18,4 +18,8 @@ void    setBrightness(uint8_t v);
 bool soundOn();
 void setSoundOn(bool v);
 
+// 当前蓝牙主机槽 (多主机切换用): 0..N-1, 默认 0.
+uint8_t hostSlot();
+void    setHostSlot(uint8_t v);
+
 }  // namespace app_prefs

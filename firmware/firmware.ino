@@ -82,10 +82,13 @@ static uint32_t g_btnBAt = 0; static bool g_btnBHold = false; static bool g_btnB
 static constexpr uint32_t BTN_HOLD_MS  = 1000;
 static constexpr uint32_t BTN_RESET_MS = 3000;  // BtnB 继续按住到 3s = 重置 WiFi
 
-// 双键同按计时 + 抑制标志: A+B 一起按住 ~1.5s 触发"重新蓝牙配对".
+// 双键同按计时 + 抑制标志:
+//   A+B 短按 (松开 < COMBO_HOLD_MS) = 切换蓝牙主机槽 (BT1/BT2 循环)
+//   A+B 按住 >= COMBO_HOLD_MS       = 重新蓝牙配对
 static uint32_t g_comboAt = 0; static bool g_comboFired = false;
 static bool g_btnSuppress = false;  // 组合态期间吞掉单键残留, 防止松手误触发回车/Esc
-static constexpr uint32_t COMBO_HOLD_MS = 1500;
+static constexpr uint32_t COMBO_HOLD_MS    = 1500;
+static constexpr uint32_t COMBO_TAP_MIN_MS = 120;  // 短于此当抖动忽略 (防滚动单击误触)
 
 // ---- 陀螺仪/加速度计自动旋转 (横屏上下两个方向: rotation 1 <-> 3) ----
 // 两个方向都是 180x135 横屏, 互为 180° 翻转, 区分靠重力在屏幕"竖直"轴上的分量符号.
@@ -193,6 +196,14 @@ static void renderFrame() {
   canvas.fillCircle(22, 9, 4, net::wifiConnected() ? COL_BLUE : COL_OFF);
   canvas.fillCircle(35, 9, 4, net::relayOk() ? COL_FG : COL_OFF);
 
+  // 多主机: 顶栏显示当前蓝牙主机槽 (BT1/BT2), 绿=该槽已连, 灰=未连.
+  if (ble_kbd::hostCount() > 1) {
+    canvas.setFont(&fonts::Font0);
+    canvas.setTextDatum(TL_DATUM);
+    canvas.setTextColor(ble_kbd::connected() ? COL_GREEN : COL_DIM);
+    canvas.drawString("BT" + String((int)ble_kbd::currentHost() + 1), 46, 5);
+  }
+
   canvas.setFont(&fonts::efontCN_14);
   String st = effectiveState();
 
@@ -234,14 +245,20 @@ static void onBShort() { doEsc();        setToast("ESC");             eyes::poke
 // BtnB 长按 1s = 进配网 (提示可继续按住重置); 继续按住到 3s = 重置 WiFi (清配置重启).
 static void onBHold()  { net::startPortal(); setToast("\u914d\u7f51\u4e2d/\u7eed\u6309\u91cd\u7f6e"); eyes::poke(); }
 static void onBReset() { setToast("WiFi \u91cd\u7f6e"); net::resetWifi(); }
-// A+B 同按 -> 重新蓝牙配对 (断开 + 清 bond + 重广播).
+// A+B 长按 -> 重新蓝牙配对 (断开 + 清 bond + 重广播).
 static void onRepair() { ble_kbd::repair(); setToast("\u91cd\u65b0\u914d\u5bf9"); eyes::poke(); }
+// A+B 短按 -> 切到下一台主机 (BT1/BT2 循环).
+static void onSwitchHost() {
+  uint8_t h = ble_kbd::switchHost();
+  setToast("BT" + String((int)h + 1));
+  eyes::poke();
+}
 
 static void handleButtons(uint32_t now) {
   bool a = M5.BtnA.isPressed();
   bool b = M5.BtnB.isPressed();
 
-  // 双键同按: 计时到 COMBO_HOLD_MS 触发重新配对; 期间抑制单键, 直到两键都松开.
+  // 双键同按: 按住到 COMBO_HOLD_MS 触发重新配对; 期间抑制单键, 直到两键都松开.
   if (a && b) {
     if (g_comboAt == 0) { g_comboAt = now; g_comboFired = false; }
     else if (!g_comboFired && now - g_comboAt >= COMBO_HOLD_MS) {
@@ -252,7 +269,14 @@ static void handleButtons(uint32_t now) {
     g_btnAAt = 0; g_btnBAt = 0;
     return;
   }
-  g_comboAt = 0;
+
+  // 双键刚结束 (至少一键松开): 没到长按阈值且按够 TAP_MIN = 短按 -> 切主机.
+  if (g_comboAt != 0) {
+    if (!g_comboFired && now - g_comboAt >= COMBO_TAP_MIN_MS) onSwitchHost();
+    g_comboAt = 0;
+    g_comboFired = false;
+    g_btnSuppress = true;  // 等两键都松开再恢复单键
+  }
 
   // 组合键过后, 等两键都松开再恢复单键响应 (避免后松开的那只键误触发).
   if (g_btnSuppress) {
