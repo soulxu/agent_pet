@@ -78,8 +78,14 @@ static const uint8_t BRIGHT_LEVELS[] = {64, 128, 200};
 static int g_brightIdx = 1;
 
 static uint32_t g_btnAAt = 0; static bool g_btnAHold = false;
-static uint32_t g_btnBAt = 0; static bool g_btnBHold = false;
-static constexpr uint32_t BTN_HOLD_MS = 1000;
+static uint32_t g_btnBAt = 0; static bool g_btnBHold = false; static bool g_btnBReset = false;
+static constexpr uint32_t BTN_HOLD_MS  = 1000;
+static constexpr uint32_t BTN_RESET_MS = 3000;  // BtnB 继续按住到 3s = 重置 WiFi
+
+// 双键同按计时 + 抑制标志: A+B 一起按住 ~1.5s 触发"重新蓝牙配对".
+static uint32_t g_comboAt = 0; static bool g_comboFired = false;
+static bool g_btnSuppress = false;  // 组合态期间吞掉单键残留, 防止松手误触发回车/Esc
+static constexpr uint32_t COMBO_HOLD_MS = 1500;
 
 // ---- 陀螺仪/加速度计自动旋转 (横屏上下两个方向: rotation 1 <-> 3) ----
 // 两个方向都是 180x135 横屏, 互为 180° 翻转, 区分靠重力在屏幕"竖直"轴上的分量符号.
@@ -225,19 +231,49 @@ static void renderFrame() {
 static void onAShort() { doEnter();      setToast("\u56de\u8f66");      eyes::poke(); }
 static void onAHold()  { doShiftEnter(); setToast("Shift+\u56de\u8f66"); eyes::poke(); }
 static void onBShort() { doEsc();        setToast("ESC");             eyes::poke(); }
-static void onBHold()  { net::startPortal(); setToast("\u914d\u7f51\u4e2d"); eyes::poke(); }
+// BtnB 长按 1s = 进配网 (提示可继续按住重置); 继续按住到 3s = 重置 WiFi (清配置重启).
+static void onBHold()  { net::startPortal(); setToast("\u914d\u7f51\u4e2d/\u7eed\u6309\u91cd\u7f6e"); eyes::poke(); }
+static void onBReset() { setToast("WiFi \u91cd\u7f6e"); net::resetWifi(); }
+// A+B 同按 -> 重新蓝牙配对 (断开 + 清 bond + 重广播).
+static void onRepair() { ble_kbd::repair(); setToast("\u91cd\u65b0\u914d\u5bf9"); eyes::poke(); }
 
 static void handleButtons(uint32_t now) {
-  if (M5.BtnA.isPressed()) {
+  bool a = M5.BtnA.isPressed();
+  bool b = M5.BtnB.isPressed();
+
+  // 双键同按: 计时到 COMBO_HOLD_MS 触发重新配对; 期间抑制单键, 直到两键都松开.
+  if (a && b) {
+    if (g_comboAt == 0) { g_comboAt = now; g_comboFired = false; }
+    else if (!g_comboFired && now - g_comboAt >= COMBO_HOLD_MS) {
+      g_comboFired = true;
+      onRepair();
+    }
+    g_btnSuppress = true;
+    g_btnAAt = 0; g_btnBAt = 0;
+    return;
+  }
+  g_comboAt = 0;
+
+  // 组合键过后, 等两键都松开再恢复单键响应 (避免后松开的那只键误触发).
+  if (g_btnSuppress) {
+    if (!a && !b) g_btnSuppress = false;
+    g_btnAAt = 0; g_btnBAt = 0;
+    return;
+  }
+
+  if (a) {
     if (g_btnAAt == 0) { g_btnAAt = now; g_btnAHold = false; }
     else if (!g_btnAHold && now - g_btnAAt >= BTN_HOLD_MS) { g_btnAHold = true; onAHold(); }
   } else {
     if (g_btnAAt != 0 && !g_btnAHold) onAShort();
     g_btnAAt = 0;
   }
-  if (M5.BtnB.isPressed()) {
-    if (g_btnBAt == 0) { g_btnBAt = now; g_btnBHold = false; }
-    else if (!g_btnBHold && now - g_btnBAt >= BTN_HOLD_MS) { g_btnBHold = true; onBHold(); }
+  if (b) {
+    if (g_btnBAt == 0) { g_btnBAt = now; g_btnBHold = false; g_btnBReset = false; }
+    else {
+      if (!g_btnBHold && now - g_btnBAt >= BTN_HOLD_MS) { g_btnBHold = true; onBHold(); }
+      if (!g_btnBReset && now - g_btnBAt >= BTN_RESET_MS) { g_btnBReset = true; onBReset(); }
+    }
   } else {
     if (g_btnBAt != 0 && !g_btnBHold) onBShort();
     g_btnBAt = 0;

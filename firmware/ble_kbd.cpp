@@ -14,6 +14,24 @@
 
 #include <cstdlib>
 
+// 清配对 (重新配对) 的底层 API 因蓝牙协议栈而异:
+//   * ESP32-S3 (StickS3) 这套 core 用 **NimBLE** -> ble_store_clear() 一把清掉所有 bond.
+//   * 经典 ESP32 (Atom Lite) 用 **Bluedroid** -> 枚举 bond 列表逐个 esp_ble_remove_bond_device.
+// 两者函数名/类型完全不同, 故按当前编译的协议栈条件编译, 各自前置声明 (避免直接
+// #include 那些只在库内部 include 路径可见的 bt 头).
+#if defined(CONFIG_NIMBLE_ENABLED)
+extern "C" int ble_store_clear(void);
+#elif defined(CONFIG_BLUEDROID_ENABLED)
+// 这几个 bond API 在 <esp_gap_ble_api.h> 里被 `#if (SMP_INCLUDED == TRUE)` 包着,
+// SMP_INCLUDED 是预编译库 sdkconfig 的宏, 用户 TU 不一定可见, 故按原型自行声明;
+// 类型 (esp_bd_addr_t / esp_ble_bond_dev_t) 在该 guard 之外, Bluedroid 下始终可见.
+extern "C" {
+int       esp_ble_get_bond_device_num(void);
+esp_err_t esp_ble_get_bond_device_list(int* dev_num, esp_ble_bond_dev_t* dev_list);
+esp_err_t esp_ble_remove_bond_device(esp_bd_addr_t bd_addr);
+}
+#endif
+
 namespace ble_kbd {
 
 namespace {
@@ -159,11 +177,12 @@ void tap(uint8_t mods, uint8_t key) {
 }
 
 void clearBonds() {
-  // bond 管理 API (esp_ble_get_bond_device_*) 在 esp_gap_ble_api.h 里被
-  // #if (SMP_INCLUDED == TRUE) 包着. 经典 ESP32(Atom)的编译配置里该宏为 TRUE,
-  // 而 ESP32-S3(StickS3)这套 TU 里没定义会被裁掉. S3 也从不调用此函数, 故条件编译.
-#if defined(SMP_INCLUDED) && (SMP_INCLUDED == TRUE)
-  // Bluedroid: 枚举已绑定设备逐个删除 (必须在 BLEDevice::init 之后调用).
+#if defined(CONFIG_NIMBLE_ENABLED)
+  // NimBLE (StickS3): 清空 bond store 里的全部配对密钥.
+  int rc = ble_store_clear();
+  Serial.printf("[kbd] NimBLE 清除全部蓝牙配对记录 (rc=%d)\n", rc);
+#elif defined(CONFIG_BLUEDROID_ENABLED)
+  // Bluedroid (Atom): 枚举已绑定设备逐个删除 (必须在 BLEDevice::init 之后调用).
   int n = esp_ble_get_bond_device_num();
   if (n <= 0) { Serial.println("[kbd] 无配对记录可清除"); return; }
   esp_ble_bond_dev_t* list =
@@ -177,8 +196,27 @@ void clearBonds() {
   }
   free(list);
 #else
-  Serial.println("[kbd] clearBonds: 当前编译配置无 bond API, 跳过");
+  Serial.println("[kbd] clearBonds: 当前协议栈无可用 bond API, 跳过");
 #endif
+}
+
+void repair() {
+  Serial.println("[kbd] 重新配对: 断开当前 host + 清 bond + 重广播");
+  // 1. 主动断开所有已连接的 host (server 角色下对端按 client=false 记录).
+  if (g_server) {
+    auto peers = g_server->getPeerDevices(false);
+    for (auto& kv : peers) g_server->disconnect(kv.first);
+    if (!peers.empty()) delay(80);  // 给断开事件一点时间落地
+  }
+  g_conn = false;
+
+  // 2. 清掉本机侧旧配对密钥 (macOS 那侧也要"移除此设备"才算干净重配).
+  clearBonds();
+
+  // 3. 重新开始广播, 让设备立刻回到可被发现/配对状态.
+  if (g_server) g_server->startAdvertising();
+  else          BLEDevice::startAdvertising();
+  Serial.println("[kbd] 已重置, 重新广播中, 可在系统蓝牙里重新配对");
 }
 
 }  // namespace ble_kbd

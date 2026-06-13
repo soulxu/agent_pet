@@ -29,5 +29,6 @@ String label();
 String text();
 
 void startPortal();        // 手动进入配网 (长按按键触发)
+void resetWifi();          // 重置 WiFi: 清掉 NVS 里的 ssid/pass/relay 并重启 -> 空白配网
 
 }  // namespace net

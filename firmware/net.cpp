@@ -84,7 +84,12 @@ String htmlPage() {
   s += g_relay;
   s += F("'><button type=submit>保存并重启</button></form>"
          "<p style='color:#888;font-size:13px'>在 Mac 上跑 relay.py (HTTPS mTLS), 这里填 Mac 的"
-         "局域网 IP 和 HTTPS 端口 (默认 8443).</p>");
+         "局域网 IP 和 HTTPS 端口 (默认 8443).</p>"
+         "<hr><form method=POST action=/reset "
+         "onsubmit=\"return confirm('确定清除已保存的 WiFi 配置并重启?')\">"
+         "<button type=submit style='background:#c0392b;color:#fff;border:none;border-radius:6px'>"
+         "重置 WiFi 配置</button></form>"
+         "<p style='color:#888;font-size:13px'>清空已保存的 WiFi 名称/密码/Relay 地址, 重启后回到空白配网页.</p>");
   return s;
 }
 
@@ -102,10 +107,24 @@ void handleSave() {
   ESP.restart();
 }
 
+void clearCfg() {
+  Preferences p;
+  if (p.begin(NS, false)) { p.clear(); p.end(); }
+}
+
+void handleReset() {
+  clearCfg();
+  g_server.send(200, "text/html; charset=utf-8",
+                "<meta charset=utf-8><h3>WiFi 配置已清除, 正在重启...</h3>");
+  delay(800);
+  ESP.restart();
+}
+
 void startHttp() {
   if (g_httpUp) return;
   g_server.on("/", handleRoot);
   g_server.on("/save", HTTP_POST, handleSave);
+  g_server.on("/reset", HTTP_POST, handleReset);
   g_server.onNotFound(handleRoot);
   g_server.begin();
   g_httpUp = true;
@@ -235,6 +254,14 @@ String text()    { lock(); String v = g_text;  unlock(); return v; }
 
 void startPortal() {
   if (!g_portal) beginPortal();
+}
+
+void resetWifi() {
+  // 清掉 NVS 里的 ssid/pass/relay, 重启后 loadCfg 读到空 -> 自动进入空白 SoftAP 配网.
+  Serial.println("[net] 重置 WiFi 配置 (清 NVS) + 重启");
+  clearCfg();
+  delay(300);
+  ESP.restart();
 }
 
 }  // namespace net

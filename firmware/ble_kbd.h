@@ -26,4 +26,8 @@ void tap(uint8_t mods, uint8_t key);
 // 清 BLE 绑定 (重新配对用).
 void clearBonds();
 
+// 重新蓝牙配对: 断开当前 host + 清掉本机配对记录 + 重新开始广播, 让设备回到
+// "可被重新配对" 的全新状态. 配合在 macOS 蓝牙设置里"移除此设备"即可干净重配.
+void repair();
+
 }  // namespace ble_kbd
